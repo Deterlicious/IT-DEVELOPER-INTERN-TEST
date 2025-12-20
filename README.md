@@ -46,7 +46,139 @@ Untuk memaksimalkan penggunaan dokumentasi ini, Anda dapat mengikuti panduan ber
 * **API Documentation:** Lihat bagian ini untuk daftar lengkap *endpoints* HTTP, parameter request, dan format respons JSON.
 * **Architecture & Schema:** Pelajari bagian ini untuk memahami bagaimana data mengalir dari *Route* ke *Controller* hingga ke *Database* (PostgreSQL).
 
+
 ---
 *Dokumentasi ini dibuat sebagai bagian dari Laporan Teknis Pengembangan Backend.*
+
+## 🎯 Getting Started
+
+Bagian ini memandu Anda untuk menyiapkan lingkungan pengembangan lokal (*local environment*) agar **Job Architecture Management API** dapat berjalan dengan lancar.
+
+### 🛠️ Prerequisites
+
+Pastikan sistem Anda telah terinstal *tools* berikut sebelum melanjutkan:
+
+* **Node.js** (v14.x atau lebih baru) - [Download Node.js](https://nodejs.org/)
+* **npm** atau **yarn** (Package Manager)
+* **PostgreSQL** (v12.x atau lebih baru) - [Download PostgreSQL](https://www.postgresql.org/)
+* **Postman/Insomnia** (Untuk pengujian API endpoint)
+
+### ⚙️ Installation
+
+Ikuti langkah-langkah berikut untuk menginstal dependensi proyek:
+
+1.  **Clone Repository**
+    Salin kode sumber ke direktori lokal Anda:
+    ```bash
+    git clone [https://github.com/blpbeauty/itdevintern_test]
+    cd itdevintern_tes
+    ```
+
+2.  **Install Dependencies**
+    Instal seluruh paket yang dibutuhkan oleh Express dan Sequelize (termasuk driver `pg` dan `sequelize-cli`):
+    ```bash
+    npm install
+    ```
+
+### 🔐 Configuration
+
+Aplikasi ini menggunakan **Environment Variables** untuk konfigurasi sensitif. 
+
+1.  Duplikasi file `.env.example` menjadi `.env` di *root directory*.
+2.  Sesuaikan kredensial di bawah ini dengan konfigurasi PostgreSQL lokal Anda:
+
+```env
+# Server Configuration
+NODE_ENV=development
+PORT=3000
+
+# Database Configuration
+DB_USERNAME=postgres
+DB_PASSWORD=password_anda
+DB_NAME=hris_job_architecture
+DB_HOST=127.0.0.1
+DB_DIALECT=postgres
+```
+
+### 🗄️ Database Setup & Migration
+Karena modul ini memiliki struktur relasional yang kompleks (JobPosition, JobLevel, Requirements) dan menggunakan tipe data JSONB, Anda wajib menjalankan migrasi database.
+
+1. Create Database Buat database baru sesuai nama di .env:
+   ```bash
+    npx sequelize-cli db:create
+    ```
+2. Run Migrations Eksekusi file migrasi untuk membuat tabel dan mengubah tipe kolom requirements menjadi JSONB:
+    ```bash
+    npx sequelize-cli db:migrate
+    ```
+    Note: Langkah ini krusial untuk memastikan skema tabel sesuai dengan definisi model di jobposition.js dan jobpositionrequirement.js.
+
+### 🚀 Running the App
+Setelah konfigurasi selesai, jalankan server dengan perintah berikut:
+Development Mode (dengan Hot-Reload):
+1. Development Mode (dengan Hot-Reload):
+   ```bash
+    npm run dev
+    ```
+2. Production Mode:
+    ```bash
+    npm start
+    ```
+3. Jika berhasil, terminal akan menampilkan output:
+    ```Plaintext
+    Server is running on port 3000
+    Database connected successfully.
+    ```
+
+## 📐 Architecture
+
+Bagian ini menjelaskan desain teknis sistem. Aplikasi ini dibangun menggunakan pola arsitektur **Layered MVC (Model-View-Controller)** yang diperkuat dengan **Repository Pattern** untuk memisahkan logika bisnis dari akses data.
+
+Pendekatan ini dipilih untuk memastikan kode yang *modular*, mudah diuji (*testable*), dan mudah dipelihara (*maintainable*).
+
+### High-Level Overview
+
+Sistem backend ini beroperasi sebagai **RESTful API Service**. Alur data dirancang untuk menangani integritas relasional yang kompleks antara struktur organisasi (Divisi, Jabatan) dan spesifikasi kualifikasi.
+
+* **Runtime:** Node.js environment.
+* **Framework:** Express.js untuk manajemen routing dan middleware.
+* **Database Abstraction:** Sequelize ORM untuk pemetaan objek ke database PostgreSQL.
+* **Architecture Style:** Monolithic Modular (diorganisir berdasarkan domain fitur).
+
+### 📂 Project Structure
+
+Berdasarkan implementasi kode, berikut adalah struktur direktori utama proyek ini:
+
+```text
+src/
+├── controllers/          # Business Logic Layer
+│   └── jobposition.controllers.js  # Mengelola request & response
+├── models/               # Data Definition Layer (Sequelize Models)
+│   ├── jobposition.js    # Schema tabel JobPositions
+│   └── jobpositionrequirement.js
+├── repositories/         # Data Access Layer
+│   └── jobpositionrequirements.repository.js # Abstraksi query database
+├── routes/               # API Routing Layer
+│   └── jobposition.routes.js       # Definisi endpoint HTTP
+├── migrations/           # Database Schema Versioning
+│   └── change-jobposition-array.js
+│   └── create-job-position.js
+│   └── create-jobposition-requirement.js
+```
+
+### 🏗️ Design Patterns
+Sistem ini menerapkan beberapa Design Pattern industri untuk menjaga kualitas kode:
+
+1.  MVC (Model-View-Controller) Pemisahan tanggung jawab yang jelas:
+
+* Routes menangani entry point HTTP.
+
+* Controllers menangani validasi input dan orkestrasi logika bisnis.
+
+* Models mendefinisikan struktur data dan relasi tabel.
+
+2.  Repository Pattern Alih-alih mengakses database langsung dari Controller untuk entitas yang kompleks, sistem menggunakan Repository (lihat jobpositionrequirements.repository.js). Ini berfungsi sebagai abstraction layer untuk operasi database spesifik, membuat kode lebih rapi dan dapat digunakan kembali (reusable).
+
+3.  Transactional Operation (ACID) Untuk operasi yang melibatkan penulisan ke beberapa tabel sekaligus (misalnya: update Jabatan sekaligus Kualifikasinya), sistem menggunakan sequelize.transaction. Ini menjamin integritas data; jika satu proses gagal, seluruh perubahan akan dibatalkan (rollback).
 
 
