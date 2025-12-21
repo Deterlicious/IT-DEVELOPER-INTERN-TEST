@@ -5,7 +5,7 @@
 ## 📋 Daftar Isi
 1. [Introduction](#-introduction-)
 2. [Getting Started](#-getting-started)
-3. [Architecture & Folder Structure](#-architecture--folder-structure)
+3. [Architecture](#-architecture)
 4. [API Documentation](#-api-documentation)
 5. [Database Schema](#-database-schema)
 
