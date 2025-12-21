@@ -171,14 +171,277 @@ Sistem ini menerapkan beberapa Design Pattern industri untuk menjaga kualitas ko
 
 1.  MVC (Model-View-Controller) Pemisahan tanggung jawab yang jelas:
 
-* Routes menangani entry point HTTP.
-
-* Controllers menangani validasi input dan orkestrasi logika bisnis.
-
-* Models mendefinisikan struktur data dan relasi tabel.
+    * Routes menangani entry point HTTP.
+    
+    * Controllers menangani validasi input dan orkestrasi logika bisnis.
+    
+    * Models mendefinisikan struktur data dan relasi tabel.
 
 2.  Repository Pattern Alih-alih mengakses database langsung dari Controller untuk entitas yang kompleks, sistem menggunakan Repository (lihat jobpositionrequirements.repository.js). Ini berfungsi sebagai abstraction layer untuk operasi database spesifik, membuat kode lebih rapi dan dapat digunakan kembali (reusable).
 
 3.  Transactional Operation (ACID) Untuk operasi yang melibatkan penulisan ke beberapa tabel sekaligus (misalnya: update Jabatan sekaligus Kualifikasinya), sistem menggunakan sequelize.transaction. Ini menjamin integritas data; jika satu proses gagal, seluruh perubahan akan dibatalkan (rollback).
 
+### 🔄 Data Flow
+
+Berikut adalah alur perjalanan data (*Request Lifecycle*) dalam sistem ini:
+
+1. **Client Request:** Pengguna mengirim request HTTP (misal: `PUT /job-position/:id`).
+2. **Route Layer:** `jobposition.routes.js` menerima request dan meneruskannya ke middleware yang relevan (jika ada).
+3. **Controller Layer:** `jobposition.controllers.js` menerima data, memvalidasi input (`req.body`), dan memanggil logika bisnis.
+4. **Repository/Model Layer:**
+* Controller memanggil `JobPosition.update()` untuk data utama.
+* Controller memanggil `jobpositionrequirementsRepository.updateByJobPositionId()` untuk data kualifikasi.
+
+
+5. **Database:** Sequelize menerjemahkan perintah ke SQL query dan mengeksekusinya di PostgreSQL secara transaksional.
+6. **Response:** Server mengembalikan respon JSON standar (`res.sendJson`) ke klien.
+
+---
+
+
+## 💻 API Documentation
+
+Dokumentasi ini menjelaskan antarmuka pemrograman aplikasi (API) untuk modul **Job Position**. Seluruh endpoint menggunakan standar RESTful dan mengembalikan respons dalam format JSON.
+
+### Base URL
+```text
+http://localhost:3000/api/v1/job-positions
+
+```
+
+*(Catatan: Base URL dapat bervariasi tergantung pada konfigurasi prefix di `app.js` utama Anda)*
+
+### Authentication
+
+Akses ke endpoint ini dilindungi oleh middleware otentikasi. Anda harus menyertakan token JWT pada header setiap permintaan.
+
+**Header Example:**
+
+```http
+Authorization: Bearer <YOUR_ACCESS_TOKEN>
+Content-Type: application/json
+
+```
+
+### 📋 Endpoints Summary
+
+| Method | Endpoint | Deskripsi |
+| --- | --- | --- |
+| `GET` | `/` | Mengambil seluruh data jabatan beserta relasinya. |
+| `GET` | `/:id` | Mengambil detail jabatan spesifik berdasarkan ID. |
+| `POST` | `/` | Membuat data jabatan baru. |
+| `PUT` | `/:id` | Memperbarui jabatan dan persyaratan kualifikasi (Transactional). |
+| `DELETE` | `/` | Menghapus data jabatan (Soft delete atau Hard delete tergantung konfigurasi). |
+
+---
+
+### 📝 Request & Response Examples
+
+Berikut adalah detail *payload* dan struktur respons berdasarkan logika pada Controller.
+
+#### 1. Create Job Position
+
+Membuat posisi baru dengan detail hierarki dan deskripsi.
+
+* **URL:** `/`
+* **Method:** `POST`
+* **Body Parameters:**
+
+```json
+{
+    "title": "Senior Backend Engineer",
+    "joblevel_id": 3,
+    "division_id": 2,
+    "superior_id": 10,
+    "purpose": "Bertanggung jawab atas arsitektur server.",
+    "requirements": ["Node.js", "PostgreSQL", "Docker"],  // Disimpan sebagai JSONB
+    "descriptions": ["Mengembangkan API", "Code Review"]    // Disimpan sebagai JSONB
+}
+
+```
+
+* **Success Response (201 Created):**
+
+```json
+{
+    "code": 201,
+    "status": true,
+    "message": "Success create a new Job Position and its Description",
+    "data": {
+        "id": 15,
+        "title": "Senior Backend Engineer",
+        "descriptions": ["Mengembangkan API", "Code Review"],
+        "createdAt": "2023-10-27T08:00:00.000Z",
+        "updatedAt": "2023-10-27T08:00:00.000Z"
+    }
+}
+
+```
+
+#### 2. Get Job Detail
+
+Mengambil data jabatan lengkap dengan relasi `Division`, `JobLevel`, `Superior`, dan `JobPosition_Requirement`.
+
+* **URL:** `/:id` (Contoh: `/15`)
+* **Method:** `GET`
+* **Success Response (200 OK):**
+
+```json
+{
+    "code": 200,
+    "status": true,
+    "message": "success find data",
+    "data": {
+        "id": 15,
+        "title": "Senior Backend Engineer",
+        "joblevel_name": "Manager",
+        "division_name": "IT Development",
+        "superior_name": "John Doe",
+        "purpose": "Bertanggung jawab atas arsitektur server.",
+        "requirements": ["Node.js", "PostgreSQL"],
+        "descriptions": ["Mengembangkan API"],
+        "careerForm": {
+            "education": "S1 Teknik Informatika",
+            "length_service": 2,
+            "performance": "A"
+        }
+    }
+}
+
+```
+
+#### 3. Update Job Position
+
+Endpoint ini menangani **Complex Update** menggunakan database transaction. Payload mencakup data jabatan utama dan data `careerForm` (persyaratan teknis).
+
+* **URL:** `/:id`
+* **Method:** `PUT`
+* **Body Parameters:**
+
+```json
+{
+    "title": "Lead Backend Engineer",
+    "joblevel_id": 4,
+    "division_id": 2,
+    "superior_id": 10,
+    "purpose": "Memimpin tim backend.",
+    "requirements": ["Node.js", "Microservices", "System Design"],
+    "descriptions": ["Mentoring", "Architecture Decision"],
+    "careerForm": {
+        "education": "S2 Teknik Informatika",
+        "length_service": 5,
+        "performance": "A"
+    }
+}
+
+```
+
+> **Note:** Object `careerForm` akan diproses oleh `jobpositionrequirementsRepository` untuk membuat atau memperbarui data di tabel `JobPosition_Requirements` secara otomatis.
+
+#### 4. Delete Job Position
+
+Menghapus data jabatan. Berdasarkan implementasi controller saat ini, ID dikirimkan melalui **Body**, bukan URL parameter.
+
+* **URL:** `/`
+* **Method:** `DELETE`
+* **Body Parameters:**
+
+```json
+{
+    "id": 15
+}
+
+```
+
+*(Catatan Teknis: Endpoint ini menggunakan `req.body.id` sesuai implementasi pada `jobposition.controllers.js`, meskipun praktik umum REST biasanya menggunakan URL Parameter)*
+
+## 💽 Database Schema
+
+Bagian ini memberikan dokumentasi mendalam mengenai struktur basis data yang digunakan dalam **Job Architecture Management API**. Sistem ini dibangun di atas **PostgreSQL** dan dikelola menggunakan **Sequelize ORM**, memanfaatkan fitur relasional standar serta kapabilitas penyimpanan dokumen (NoSQL) untuk fleksibilitas data.
+
+### 📊 Entity Relationship Diagram (ERD)
+
+Diagram berikut memvisualisasikan hubungan antar entitas, termasuk kardinalitas dan arah relasi:
+
+![ERD Job Architecture](ERD%20IT%20DevIntern.drawio.png)
+
+---
+
+### 📋 Detailed Table Structures
+
+Berikut adalah spesifikasi teknis untuk setiap tabel utama dalam modul ini.
+
+#### 1. Table: `JobPositions`
+Tabel entitas utama yang merepresentasikan definisi jabatan dalam struktur organisasi.
+
+| Column Name | Data Type | Constraints / Properties | Description |
+| :--- | :--- | :--- | :--- |
+| **id** | `INTEGER` | `PK`, `AutoIncrement` | Identifikasi unik untuk setiap jabatan. |
+| **title** | `STRING` | `UNIQUE`, `AllowNull: false` | Nama resmi jabatan. Constraint `Unique` mencegah duplikasi nama jabatan dalam perusahaan. |
+| **joblevel_id** | `INTEGER` | `FK` (ref: `JobLevel`) | Menunjukkan tingkatan/grade dari jabatan ini (misal: Staff, Manager). |
+| **division_id** | `INTEGER` | `FK` (ref: `Division`) | Menunjukkan departemen atau divisi tempat jabatan ini bernaung. |
+| **superior_id** | `INTEGER` | `FK` (ref: `User`), `Default: null` | ID User yang menjadi atasan langsung (*reporting line*). Bernilai `null` jika posisi tertinggi. |
+| **purpose** | `STRING` | `AllowNull: true` | Penjelasan singkat mengenai tujuan utama keberadaan posisi ini. |
+| **requirements** | `JSONB` | `Default: []` | **Hybrid Column**. Menyimpan daftar kualifikasi umum dalam format JSON Array. Menggantikan tipe `ARRAY` lama untuk performa query yang lebih baik di PostgreSQL. |
+| **descriptions** | `JSONB` | `Default: []` | **Hybrid Column**. Menyimpan daftar tanggung jawab (*Job Desc*) dalam format JSON Array. |
+| **createdAt** | `DATE` | `Not Null` | Timestamp otomatis saat data dibuat. |
+| **updatedAt** | `DATE` | `Not Null` | Timestamp otomatis saat data diperbarui. |
+
+#### 2. Table: `JobPosition_Requirements`
+Tabel ini menyimpan parameter kualifikasi yang terukur (kuantitatif) untuk keperluan validasi kandidat atau promosi.
+
+| Column Name | Data Type | Constraints / Properties | Description |
+| :--- | :--- | :--- | :--- |
+| **id** | `INTEGER` | `PK`, `AutoIncrement` | Identifikasi unik record requirement. |
+| **jobposition_id** | `INTEGER` | `FK` (ref: `JobPositions`), `Not Null` | Relasi ke jabatan induk. Memiliki sifat `ON DELETE CASCADE`. |
+| **education** | `STRING` | `AllowNull: true` | Persyaratan tingkat pendidikan minimal (contoh: "S1 Teknik Informatika"). |
+| **length_service**| `INTEGER` | `AllowNull: true` | Persyaratan masa kerja minimal dalam satuan tahun (contoh: 2). |
+| **performance** | `STRING` | `AllowNull: true` | Persyaratan nilai performa minimal (contoh: "A" atau "Exceeds Expectations"). |
+
+---
+
+### 🔗 Key Relationships & Associations
+
+Aplikasi ini menggunakan asosiasi Sequelize untuk menegakkan integritas referensial antar data. Berikut adalah pemetaan detailnya:
+
+#### Hierarchical Relationships (Relasi Hierarki)
+* **JobPosition belongsTo Division**
+    * **Foreign Key:** `division_id`
+    * **Deskripsi:** Setiap jabatan wajib terhubung ke satu divisi.
+* **JobPosition belongsTo JobLevel**
+    * **Foreign Key:** `joblevel_id`
+    * **Deskripsi:** Setiap jabatan memiliki satu level tingkatan.
+* **JobPosition belongsTo User (as 'superior')**
+    * **Foreign Key:** `superior_id`
+    * **Alias:** `superior`
+    * **Deskripsi:** Relasi *Self-Reference* (ke tabel User) untuk menentukan struktur pelaporan kepada atasan.
+
+#### Specification Relationships (Relasi Spesifikasi)
+* **JobPosition hasMany JobPosition_Requirement**
+    * **Foreign Key:** `jobposition_id`
+    * **Alias:** `jobposition_req`
+    * **Behavior:** `ON UPDATE CASCADE`, `ON DELETE CASCADE`
+    * **Deskripsi:** Relasi 1-to-N. Jika sebuah `JobPosition` dihapus, maka seluruh data `Requirement` spesifik yang melekat padanya akan otomatis terhapus untuk mencegah data sampah (*orphan data*).
+
+#### Operational Relationships (Relasi Operasional)
+* **JobPosition hasMany User**
+    * **Foreign Key:** `jobposition_id`
+    * **Deskripsi:** Satu jabatan dapat diduduki oleh banyak karyawan (User).
+* **JobPosition hasMany NumberRequest**
+    * **Foreign Key:** `signer_id`
+    * **Deskripsi:** Jabatan tertentu memiliki otoritas untuk menandatangani permintaan penomoran dokumen.
+
+---
+
+### 💡 Design Decisions Highlights
+
+#### 1. Penggunaan JSONB untuk Fleksibilitas
+Pada migrasi `change-jobposition-array.js`, kolom `requirements` dan `descriptions` diubah dari tipe `ARRAY` menjadi `JSONB`.
+* **Alasan:** Format `JSONB` di PostgreSQL memungkinkan penyimpanan data semi-terstruktur yang lebih efisien, mendukung *indexing* pada elemen array, dan memudahkan perubahan struktur data kualifikasi di masa depan tanpa perlu mengubah skema tabel utama secara drastis.
+
+#### 2. Pemisahan Tabel Requirement
+Data kualifikasi dipisah menjadi dua:
+1.  **Deskriptif:** Disimpan di kolom JSONB `JobPositions` (untuk poin-poin umum).
+2.  **Terukur:** Disimpan di tabel `JobPosition_Requirements` (untuk Pendidikan, Masa Kerja, Performa).
+* **Alasan:** Pemisahan ini memungkinkan sistem melakukan *query filtering* yang presisi (misal: "Cari jabatan yang butuh pengalaman > 2 tahun") pada tabel relasional, sementara tetap menyimpan deskripsi kualitatif yang panjang di JSONB.
 
