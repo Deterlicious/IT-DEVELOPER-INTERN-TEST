@@ -189,8 +189,8 @@ Berikut adalah alur perjalanan data (*Request Lifecycle*) dalam sistem ini:
 2. **Route Layer:** `jobposition.routes.js` menerima request dan meneruskannya ke middleware yang relevan (jika ada).
 3. **Controller Layer:** `jobposition.controllers.js` menerima data, memvalidasi input (`req.body`), dan memanggil logika bisnis.
 4. **Repository/Model Layer:**
-* Controller memanggil `JobPosition.update()` untuk data utama.
-* Controller memanggil `jobpositionrequirementsRepository.updateByJobPositionId()` untuk data kualifikasi.
+    * Controller memanggil `JobPosition.update()` untuk data utama.
+    * Controller memanggil `jobpositionrequirementsRepository.updateByJobPositionId()` untuk data kualifikasi.
 
 
 5. **Database:** Sequelize menerjemahkan perintah ke SQL query dan mengeksekusinya di PostgreSQL secara transaksional.
