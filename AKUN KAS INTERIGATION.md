@@ -130,6 +130,46 @@ Semua consumer cukup `POST /api/pembayaran` — saldo akun kas **otomatis terupd
 
 ---
 
+## 🔴 Kasus 6: Backend SUDAH Melakukan Ini untuk Pengeluaran — Tapi TIDAK untuk Pemasukan
+
+### Bukti dari `bebanOperasionalService.js`
+
+Backend **sudah punya pattern yang persis sama** untuk beban operasional (uang keluar):
+
+```javascript
+// bebanOperasionalService.js — CREATE (line 78)
+const updateKas = await AkunKas.findOneAndUpdate({
+  _id: payload.akunKasID,
+  tenantID: payload.tenantID
+}, {
+  $inc: { saldo: -payload.jumlah }  // ← KURANGI saldo saat ada pengeluaran
+}, { new: true });
+
+// bebanOperasionalService.js — DELETE (line 168)
+await AkunKas.updateOne({
+  _id: target.akunKasID,
+  tenantID: requesterTenantID
+}, {
+  $inc: { saldo: target.jumlah }  // ← KEMBALIKAN saldo saat beban dihapus
+});
+```
+
+### Kondisi Saat Ini (Tidak Simetris)
+
+| Jenis Transaksi | Update Saldo Akun Kas? | Dampak |
+|---|:---:|---|
+| **Beban Operasional** (uang keluar) | ✅ `$inc: -jumlah` | Saldo berkurang otomatis |
+| **Pembayaran Invoice** (uang masuk) | ❌ Tidak ada | Saldo TIDAK bertambah |
+
+### Artinya
+> Saldo akun kas **hanya turun** (karena beban operasional), tapi **tidak pernah naik** (dari pembayaran invoice).
+>
+> Semakin banyak invoice dibayar, semakin **tidak akurat** saldo akun kas — karena hanya sisi pengeluaran yang ter-track.
+>
+> Ini bukan fitur baru — ini **melengkapi pattern yang sudah ada** di codebase.
+
+---
+
 ## 📊 Perbandingan Lengkap
 
 | Aspek | Frontend-Only | Backend (Recommended) |
