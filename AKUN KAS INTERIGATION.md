@@ -1,199 +1,251 @@
-# ⚠️ PROPOSAL: Integrasi Pembayaran → Akun Kas (Backend)
+# ⚠️ BUG: Invoice PAID Tapi Saldo Akun Kas Tidak Bertambah
 
-> **Dokumen ini menjelaskan mengapa backend (`pembayaranService.js`) HARUS dimodifikasi
-> untuk menambahkan update saldo Akun Kas saat pembayaran invoice dilakukan.**
-
----
-
-## 📌 Masalah Saat Ini
-
-Saat ini, ketika pembayaran invoice berhasil dicatat (`POST /api/pembayaran`), backend:
-
-- ✅ Membuat record `Pembayaran`
-- ✅ Meng-update `totalDibayar` dan `statusBayar` di `Penjualan`
-- ❌ **TIDAK** meng-update `saldo` di `AkunKas`
-
-Artinya: **uang masuk tercatat, tapi saldo kas tidak ikut bertambah.**
+> **Flow yang bermasalah:**
+> Create Invoice → Bayar di Detail Screen → Status PAID → ❌ Saldo Akun Kas TIDAK terupdate
 
 ---
 
-## 🔴 Kasus 1: Data Keuangan Tidak Konsisten (KRITIS)
+## 📌 Ringkasan Masalah
 
-### Skenario
-> Pelanggan A membayar invoice Rp 500.000 via **Transfer BCA**.
-> Metode "Transfer BCA" terhubung ke Akun Kas **"Rekening BCA"** (saldo: Rp 1.000.000).
-
-### Hasil Sekarang (SALAH)
-| Data | Nilai |
-|---|---|
-| `Pembayaran.jumlahBayar` | Rp 500.000 ✅ recorded |
-| `Penjualan.totalDibayar` | Rp 500.000 ✅ updated |
-| `AkunKas "Rekening BCA".saldo` | **Rp 1.000.000** ❌ tidak berubah! |
-
-### Dampak
-- Dashboard keuangan menunjukkan saldo yang **salah**
-- Laporan arus kas **tidak akurat**
-- Rekonsiliasi bank manual → **buang waktu**
-- Semakin banyak transaksi, semakin besar **selisih** antara saldo nyata vs saldo sistem
+Ketika invoice sudah selesai dibayar (status `PAID`), total pembayaran **tidak masuk** ke saldo Akun Kas — walaupun metode pembayaran yang dipakai sudah terhubung ke Akun Kas.
 
 ---
 
-## 🔴 Kasus 2: Race Condition Jika Dikerjakan di Frontend
+## 🔍 Bukti dari Kode Backend (Line by Line)
 
-### Skenario
-> 2 kasir bayar invoice BERSAMAAN via metode yang sama (misal: "Cash" → Akun Kas "Kas Fisik").
+### Step 1: Create Invoice — `penjualanService.create()` ✅ OK
 
-### Alur Jika Dikerjakan di Frontend
+Invoice dibuat melalui `POST /api/penjualan`. Field yang di-set:
+- `statusBayar = "UNPAID"` (default dari model, baris 130)
+- `sisaTagihan = totalTagihan` (dihitung oleh pre-validate hook)
 
-| Waktu | Kasir A | Kasir B |
-|---|---|---|
-| `T+0ms` | GET saldo → **Rp 1.000.000** | GET saldo → **Rp 1.000.000** |
-| `T+50ms` | Hitung: 1.000.000 + 300.000 = 1.300.000 | Hitung: 1.000.000 + 200.000 = 1.200.000 |
-| `T+100ms` | PUT saldo = **1.300.000** ✅ | — |
-| `T+150ms` | — | PUT saldo = **1.200.000** ❌ Overwrite! |
+> Tidak ada masalah di sini — invoice dibuat dengan status UNPAID. Belum ada uang masuk.
 
-### Hasil
-| Seharusnya | Aktual |
-|---|---|
-| Rp 1.500.000 (1M + 300K + 200K) | **Rp 1.200.000** ❌ |
-| Selisih: **Rp 300.000 hilang** dari sistem | |
+---
 
-### Mengapa Ini Terjadi?
-Backend `akunKasService.update()` menggunakan `$set` (menimpa nilai), **bukan `$inc`** (menambah secara atomic).
-Hanya backend yang bisa menggunakan `$inc` — frontend tidak punya akses ke operasi atomic MongoDB.
+### Step 2: Bayar Invoice — `pembayaranService.create()` ⚠️ MASALAH DI SINI
 
-### Solusi Backend (1 baris)
+**File: `services/pembayaranService.js` baris 228-351**
+
+Saat user bayar invoice dari Detail Screen, backend melakukan:
+
+```
+Baris 235-244  →  Fetch Penjualan + Fetch MetodePembayaran (sudah punya akunKasID)
+Baris 257-261  →  Set status = "PAID" (jika metode non-automated)
+Baris 292-300  →  Validasi jumlahBayar
+Baris 302-308  →  Cek jumlahBayar ≤ sisaTagihan
+Baris 310-318  →  Validasi akunKasID (HANYA validasi, TIDAK update saldo)
+Baris 325      →  Pembayaran.create(payload)  ← record pembayaran tersimpan
+Baris 327      →  _syncPenjualan()  ← update totalDibayar di Penjualan
+Baris 328      →  Invalidate Redis cache
+Baris 339      →  Return result  ← SELESAI. SALDO AKUN KAS TIDAK DISENTUH.
+```
+
+#### Bukti 1: `metodeValid.akunKasID` sudah di-fetch tapi TIDAK dipakai
+
 ```javascript
-// ATOMIC — tidak mungkin race condition
+// pembayaranService.js baris 240-244
+// Backend SUDAH fetch metode pembayaran yang punya akunKasID
+const metodeValid = await MetodePembayaran.findOne({
+  _id: payload.metodePembayaranID,
+  tenantID: payload.tenantID,
+  isActive: true,
+});
+// metodeValid.akunKasID = "id_akun_kas"  ← ADA, tapi tidak pernah dipakai untuk update saldo
+```
+
+#### Bukti 2: Validasi `akunKasID` hanya CEK — tidak UPDATE
+
+```javascript
+// pembayaranService.js baris 310-318
+// Backend HANYA mengecek apakah akunKasID valid — BUKAN menambah saldo
+if (payload.akunKasID) {
+  const akunKasValid = await AkunKas.findOne({
+    _id: payload.akunKasID,
+    tenantID: payload.tenantID,
+  });
+  if (!akunKasValid) {
+    return { error: ["ID Akun Kas tidak ditemukan atau akses ditolak."] };
+  }
+}
+// ← Selesai. Tidak ada AkunKas.findByIdAndUpdate() atau $inc saldo di sini.
+```
+
+#### Bukti 3: Setelah `Pembayaran.create()` — langsung return tanpa update saldo
+
+```javascript
+// pembayaranService.js baris 324-339
+try {
+  const created = await Pembayaran.create(payload);       // ← Pembayaran disimpan
+  await this._syncPenjualan(payload.penjualanID, ...);    // ← Update totalDibayar di Penjualan
+  await redis.del(CACHE_KEY_LIST(payload.tenantID));      // ← Invalidate cache
+  // ... populate dan return result
+  return this._formatOutput(result);                      // ← SELESAI.
+  
+  // ❌ TIDAK ADA:
+  // await AkunKas.findByIdAndUpdate(metodeValid.akunKasID, { $inc: { saldo: jumlahBayar } });
+}
+```
+
+---
+
+### Step 3: _syncPenjualan() — Update Penjualan Saja, BUKAN Akun Kas
+
+**File: `services/pembayaranService.js` baris 65-86**
+
+```javascript
+async _syncPenjualan(penjualanID, tenantID) {
+  const penjualan = await Penjualan.findOne({ _id: penjualanID, tenantID });
+  if (!penjualan) return;
+
+  // Hitung total semua pembayaran PAID
+  const pembayaranSukses = await Pembayaran.find({
+    penjualanID, tenantID, status: "PAID",
+  });
+  const totalUangMasuk = pembayaranSukses.reduce(
+    (acc, curr) => acc + (curr.jumlahBayar || 0), 0
+  );
+
+  penjualan.totalDibayar = totalUangMasuk;  // ← HANYA update Penjualan
+  await penjualan.save();                    // ← Trigger pre-validate hook
+
+  // ❌ TIDAK ADA update AkunKas.saldo di sini
+}
+```
+
+---
+
+### Step 4: Model pre-validate — Auto StatusBayar, BUKAN Saldo
+
+**File: `models/penjualanModel.js` baris 190-230**
+
+```javascript
+PenjualanSchema.pre("validate", function (next) {
+  // ... hitung totalTagihan, sisaTagihan ...
+
+  if (this.totalTagihan === 0 || this.sisaTagihan === 0) {
+    this.statusBayar = "PAID";     // ← statusBayar jadi PAID
+  } else if (dibayar > 0 && this.sisaTagihan > 0) {
+    this.statusBayar = "PARTIAL";
+  } else {
+    this.statusBayar = "UNPAID";
+  }
+
+  next();
+  // ❌ TIDAK ADA update AkunKas.saldo di sini — hook ini HANYA tentang Penjualan
+});
+```
+
+---
+
+## 🔴 Kesimpulan: Saldo Akun Kas TIDAK PERNAH Terupdate
+
+```
+Create Invoice (penjualanService.create)
+  └→ statusBayar = UNPAID                    ← ✅ OK
+  └→ AkunKas.saldo = tidak disentuh          ← ✅ OK (belum bayar)
+
+Bayar Invoice (pembayaranService.create)
+  └→ Pembayaran.create() = tersimpan         ← ✅ OK
+  └→ _syncPenjualan() = totalDibayar updated ← ✅ OK  
+  └→ statusBayar = PAID                      ← ✅ OK (via pre-validate)
+  └→ AkunKas.saldo = ❌ TIDAK DISENTUH       ← 🔴 BUG
+
+Delete Pembayaran (pembayaranService.delete)
+  └→ Pembayaran dihapus                      ← ✅ OK
+  └→ _syncPenjualan() = totalDibayar updated ← ✅ OK
+  └→ AkunKas.saldo = ❌ TIDAK DISENTUH       ← 🔴 BUG
+
+Update Pembayaran (pembayaranService.update)
+  └→ jumlahBayar berubah                     ← ✅ OK
+  └→ _syncPenjualan() = totalDibayar updated ← ✅ OK
+  └→ AkunKas.saldo = ❌ TIDAK DISENTUH       ← 🔴 BUG
+```
+
+**Tidak ada satu pun tempat di seluruh backend yang menjalankan:**
+```javascript
 await AkunKas.findByIdAndUpdate(akunKasID, { $inc: { saldo: jumlahBayar } });
 ```
 
 ---
 
-## 🔴 Kasus 3: Inconsistent State Saat Network Error
+## 🔴 Mengapa Frontend Tidak Bisa Menyelesaikan Masalah Ini
 
-### Skenario (Frontend Approach)
-```
-1. createPembayaran() → ✅ Sukses, pembayaran tersimpan
-2. GET /api/akunkas/:id → ✅ Dapat saldo
-3. PUT /api/akunkas/:id → ❌ TIMEOUT / Network Error
-```
-
-### Hasil
-- Pembayaran **sudah tercatat** di database
-- Saldo Akun Kas **belum terupdate**
-- **Tidak ada mekanisme rollback** — data permanen tidak konsisten
-- User tidak tahu bahwa update saldo gagal
-
-### Jika Dikerjakan di Backend
-```
-1. Pembayaran.create() → sukses
-2. AkunKas.$inc(saldo) → sukses/gagal di satu tempat
-3. Jika gagal → bisa rollback pembayaran dalam satu transaction
-```
-Semua terjadi di **server yang sama, di satu request cycle** — tidak ada network hop yang bisa gagal.
-
----
-
-## 🔴 Kasus 4: Operasi Delete/Update Pembayaran Tidak Ter-handle
-
-### Skenario
-> Admin menghapus pembayaran yang salah input.
-
-### Jika Frontend-Only
-- Harus buat logic di Flutter: "setelah delete pembayaran → GET akun kas → kurangi saldo → PUT ulang"
-- Setiap screen yang punya fitur delete/edit pembayaran harus **copy-paste** logic yang sama
-- Kalau ada screen baru yang bisa delete pembayaran di masa depan, developer harus **ingat** untuk tambahkan logic ini — rawan lupa
-
-### Jika Backend
-- Logic saldo ada di **1 tempat**: `pembayaranService.js`
-- Semua operasi (create/update/delete) otomatis handle saldo
-- Developer Flutter **tidak perlu tahu** tentang logic akun kas — sudah ter-enkapsulasi
-
----
-
-## 🔴 Kasus 5: Multi-Platform & API Consumer Lain
-
-### Skenario Masa Depan
-Jika nanti ada:
-- **Web dashboard** yang juga bisa create pembayaran
-- **Integrasi Xendit webhook** yang auto-confirm pembayaran
-- **Mobile app kedua** (misal app khusus kasir)
-
-### Jika Frontend-Only
-Setiap platform/consumer harus **implementasi ulang** logic update saldo akun kas.
-Satu platform lupa? → saldo tidak konsisten.
-
-### Jika Backend
-Semua consumer cukup `POST /api/pembayaran` — saldo akun kas **otomatis terupdate** di server.
-**Zero duplication, zero risk.**
-
----
-
-## 🔴 Kasus 6: Backend SUDAH Melakukan Ini untuk Pengeluaran — Tapi TIDAK untuk Pemasukan
-
-### Bukti dari `bebanOperasionalService.js`
-
-Backend **sudah punya pattern yang persis sama** untuk beban operasional (uang keluar):
+### 1. Backend pakai `$set`, bukan `$inc`
 
 ```javascript
-// bebanOperasionalService.js — CREATE (line 78)
-const updateKas = await AkunKas.findOneAndUpdate({
-  _id: payload.akunKasID,
-  tenantID: payload.tenantID
-}, {
-  $inc: { saldo: -payload.jumlah }  // ← KURANGI saldo saat ada pengeluaran
-}, { new: true });
-
-// bebanOperasionalService.js — DELETE (line 168)
-await AkunKas.updateOne({
-  _id: target.akunKasID,
-  tenantID: requesterTenantID
-}, {
-  $inc: { saldo: target.jumlah }  // ← KEMBALIKAN saldo saat beban dihapus
-});
+// akunKasService.update() baris 90-96
+const updated = await AkunKas.findOneAndUpdate(
+  { _id: id, tenantID: requesterTenantID },
+  payload,    // ← $set — MENIMPA saldo, bukan menambah!
+  { new: true, runValidators: true }
+);
 ```
 
-### Kondisi Saat Ini (Tidak Simetris)
+Dari frontend, kita hanya bisa: GET saldo → tambah manual → PUT saldo baru.
+Ini **tidak atomic** — 2 kasir bayar bersamaan = saldo kacau.
 
-| Jenis Transaksi | Update Saldo Akun Kas? | Dampak |
+### 2. Hanya backend yang bisa `$inc` (atomic)
+
+```javascript
+// YANG DIBUTUHKAN (hanya bisa di backend):
+await AkunKas.findByIdAndUpdate(akunKasID, { $inc: { saldo: jumlahBayar } });
+// $inc = operasi atomic MongoDB — tidak mungkin race condition
+```
+
+### 3. Jika network error di frontend, saldo tidak konsisten
+
+```
+Frontend: createPembayaran()  → ✅ Sukses, tersimpan di DB
+Frontend: GET /api/akunkas    → ✅ Dapat saldo Rp 1.000.000
+Frontend: PUT saldo 1.500.000 → ❌ TIMEOUT
+// Pembayaran sudah tercatat, tapi saldo akun kas tidak updated = data tidak konsisten
+```
+
+Di backend, semua terjadi di **1 request cycle** — jika gagal, bisa rollback.
+
+---
+
+## 🟢 Backend SUDAH Punya Pattern yang Sama — untuk Pengeluaran
+
+**File: `services/bebanOperasionalService.js`**
+
+Saat beban operasional dicatat (uang keluar), backend **sudah update saldo akun kas**:
+
+```javascript
+// CREATE beban (baris 78) — kurangi saldo
+await AkunKas.findOneAndUpdate(
+  { _id: payload.akunKasID, tenantID: payload.tenantID },
+  { $inc: { saldo: -payload.jumlah } }    // ← SUDAH ADA untuk pengeluaran!
+);
+
+// DELETE beban (baris 168) — kembalikan saldo
+await AkunKas.updateOne(
+  { _id: target.akunKasID, tenantID: requesterTenantID },
+  { $inc: { saldo: target.jumlah } }      // ← SUDAH ADA untuk rollback!
+);
+```
+
+### Situasi Sekarang (Tidak Simetris)
+
+| Transaksi | Update Saldo Akun Kas? | File |
 |---|:---:|---|
-| **Beban Operasional** (uang keluar) | ✅ `$inc: -jumlah` | Saldo berkurang otomatis |
-| **Pembayaran Invoice** (uang masuk) | ❌ Tidak ada | Saldo TIDAK bertambah |
+| **Beban Operasional** (uang keluar) | ✅ `$inc: { saldo: -jumlah }` | `bebanOperasionalService.js` |
+| **Pembayaran Invoice** (uang masuk) | ❌ Tidak ada | `pembayaranService.js` |
 
-### Artinya
-> Saldo akun kas **hanya turun** (karena beban operasional), tapi **tidak pernah naik** (dari pembayaran invoice).
->
-> Semakin banyak invoice dibayar, semakin **tidak akurat** saldo akun kas — karena hanya sisi pengeluaran yang ter-track.
->
-> Ini bukan fitur baru — ini **melengkapi pattern yang sudah ada** di codebase.
+> **Saldo akun kas hanya TURUN (dari beban), tapi TIDAK PERNAH NAIK (dari pembayaran invoice).**
+> Semakin banyak invoice dibayar, semakin tidak akurat saldo.
 
 ---
 
-## 📊 Perbandingan Lengkap
+## ✅ Fix yang Dibutuhkan
 
-| Aspek | Frontend-Only | Backend (Recommended) |
-|---|---|---|
-| **Atomicity** | ❌ GET → Calculate → SET (3 step, bisa race) | ✅ `$inc` atomic (1 step) |
-| **Consistency** | ❌ Bisa inconsistent jika network gagal | ✅ Satu transaction cycle |
-| **Maintenance** | ❌ Logic tersebar di tiap screen | ✅ 1 tempat (`pembayaranService.js`) |
-| **Multi-platform** | ❌ Harus re-implement per platform | ✅ Otomatis untuk semua consumer |
-| **Code changes** | ~20 baris di Flutter | **~3 baris** di backend |
-| **Testing** | Sulit test race condition | Mudah test, atomic by design |
-| **Rollback** | ❌ Tidak mungkin | ✅ Bisa dalam satu try/catch |
+**1 file, 3 titik perubahan, ~15 baris:**
 
----
+### `pembayaranService.js` → `create()` (setelah baris 327)
 
-## ✅ Perubahan yang Dibutuhkan (Minimal)
-
-### File: `services/pembayaranService.js`
-
-**Hanya 3 titik perubahan di 1 file:**
-
-#### 1. `create()` — setelah `Pembayaran.create()` (baris ~327)
 ```javascript
 // Setelah: await this._syncPenjualan(...)
-// Tambahkan:
 if (payload.status === "PAID" && metodeValid.akunKasID) {
   await AkunKas.findByIdAndUpdate(metodeValid.akunKasID, {
     $inc: { saldo: jumlahBayarNum }
@@ -203,9 +255,9 @@ if (payload.status === "PAID" && metodeValid.akunKasID) {
 }
 ```
 
-#### 2. `delete()` — sebelum `Pembayaran.deleteOne()` (baris ~502)
+### `pembayaranService.js` → `delete()` (sebelum baris 502)
+
 ```javascript
-// Jika pembayaran yang dihapus status PAID, kembalikan saldo
 if (target.status === "PAID") {
   const metode = await MetodePembayaran.findById(target.metodePembayaranID);
   if (metode?.akunKasID) {
@@ -218,21 +270,11 @@ if (target.status === "PAID") {
 }
 ```
 
-#### 3. `update()` — saat jumlahBayar atau status berubah
+### `pembayaranService.js` → `update()` (rollback old + apply new)
+
 ```javascript
-// Rollback saldo lama jika status sebelumnya PAID
-// Apply saldo baru jika status baru PAID 
+// Rollback saldo lama jika sebelumnya PAID
+// Apply saldo baru jika sekarang PAID
 ```
 
-**Total: ~15 baris tambahan di 1 file. Zero breaking changes. Zero migration.**
-
----
-
-## 🎯 Kesimpulan
-
-> Backend modification **bukan opsi**, tapi **keharusan** untuk integritas data keuangan.
-> 
-> Tanpa ini, setiap pembayaran invoice akan membuat selisih saldo yang **terakumulasi**
-> dan **tidak mungkin** diperbaiki secara otomatis.
-> 
-> Perubahan yang dibutuhkan: **~15 baris di 1 file**, tanpa breaking changes.
+**Pattern ini 100% identik dengan `bebanOperasionalService.js` — bukan fitur baru, tapi melengkapi yang sudah ada.**
